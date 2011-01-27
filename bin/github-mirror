@@ -14,67 +14,64 @@ my $script_path = abs_path( $0 =~ m|^/| ? $0 : getcwd . "/$0" );
 my $script      = basename( $script_path );
 my $prefix      = dirname( dirname ( $script_path ) );
 
-my $opts = {
-    config => "$prefix/etc/$script.conf",
-};
+my $config      = "$prefix/etc/$script.conf";
 
-GetOptions( $opts,
-    "config|config-file:s",
-    "save|save-config",
-    "owner:s",
-    "directory:s",
-);
+GetOptions(
+    "config:s"      => \$config,
+) or croak;
 
 # Initialize config file if it doesn't exist.
 umask(0177);
-if( ! -f $opts->{config} ) {
-    if( $opts->{save} ) {
-        sysopen( my $fh, $opts->{config}, O_WRONLY|O_CREAT|O_EXCL ) or croak( $! );
-        close($fh);
+if( ! -f $config ) {
+    sysopen( my $fh, $config, O_WRONLY|O_CREAT|O_EXCL ) or croak( $! );
+    close($fh);
+}
+
+# Load config
+my $cfg = Config::YAML->new(
+    config      => $config,
+    output      => $config,
+); 
+
+umask(0007);
+foreach my $src ( @{$cfg->{sources}} ) {
+    my @cmd;
+    my @output;
+
+    # If the destination exists, make sure it is a clone of
+    # the source.
+    if( -d $src->{destination} ) {
+        chdir( $src->{destination} ) or croak( $! );
+        my $url = ( run( qw( git config --get remote.origin.url ) ) )[0] || "";
+        chomp( $url );
+        if( $url and $url ne $src->{url} ) {
+            croak( "$src->{destination} exists, but is not a clone of $src->{url}" );
+        }
+        @cmd =  qw| git fetch |;
+        @output = run( @cmd );
     }
     else {
-        print "$opts->{config} does not exist.  To create it automatically, pass the --save-config option on the command line.\n";
-        exit;
+        if( $src->{mode} eq "mirror" ) {
+            @cmd =  ( qw| git clone --mirror --shared |, $src->{url}, $src->{destination} );
+        }
+        elsif( $src->{mode} eq "clone" ) {
+            @cmd =  ( qw| git clone |, $src->{url}, $src->{destination} );
+        }
+        @output = run( @cmd );
     }
+    print join( "\n", @output ) . "\n";
 }
 
-# Load config and merge with command line options.
-my $cfg = Config::YAML->new(
-    config     => $opts->{config},
-    output     => $opts->{config},
-    owner      => "",
-    repository => "",
-    directory  => "",
-); 
-while( my( $key, $value ) = each( %{$opts} ) ) {
-    if( $value ) {
-        $cfg->{$key} = $value;
-    }
+sub run {
+    open( my $pipe, "-|", @_ ) or croak( $! );
+    my @output = ( <$pipe> );
+    close( $pipe );
+    return( @output );
 }
-delete($cfg->{config});
-delete($cfg->{save});
-
-# Bailout if we don't have the need settings
-if( ! $cfg->{owner} ) {
-    print "You must specify the owner in the config or with the command line option --owner.\n";
-    exit;
-}
-if( ! $cfg->{directory} ) {
-    print "You must specify the destination directory in the config or with the command line option --directory.\n";
-    exit;
-}
-if( ! -d $cfg->{directory} ) {
-    croak( "$cfg->{directory} is not a directory!\n" );
-}
-
-# Save the current config if requested.
-if( $opts->{save} ) {
-    $cfg->write();
-}
-
+__END__
 my $github = Net::GitHub->new(
     owner => $cfg->{owner},
-    repo  => $cfg->{repository},
+    repo  => "",
 );
 if( exists( $github->user->show->{"error"} ) ) {
     croak( "$opts->{owner} is not a valid user!" );
@@ -91,9 +88,6 @@ foreach my $repo ( @{$github->repos->show->{repositories}} ) {
         @cmd =  ( qw| git clone --mirror --bare --shared |, $github_url, $local_dir );
         @output = run( @cmd );
         chdir( $local_dir ) or croak( $! );
-        @cmd = ( qw | git remote add origin |, $github_url );
-        @output = run( @cmd );
-        print STDOUT join("\n", @output );
     }
     else {
         chdir( $local_dir ) or croak( $! );
@@ -105,9 +99,3 @@ foreach my $repo ( @{$github->repos->show->{repositories}} ) {
 }
 # git clone --mirror --bare --shared git@github.com:therevmj/puppet-module-software.git
 
-sub run {
-    open( my $pipe, "-|", @_ ) or croak( $! );
-    my @output = ( <$pipe> );
-    close( $pipe );
-    return( @output );
-}
